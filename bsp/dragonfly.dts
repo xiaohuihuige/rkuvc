@@ -1,0 +1,149 @@
+/dts-v1/;
+
+#include "dragonfly-core3576.dtsi"
+#include "dragonfly-usb-c.dtsi"
+#include "dragonfly-cam.dtsi"
+#include "dragonfly-pcie.dtsi"
+#include "dragonfly-wireless.dtsi"
+#include "dragonfly-key.dtsi"
+#include "dragonfly-motor.dtsi"
+#include "rk3576-linux.dtsi"
+
+/ {
+	model = "dragonfly";
+	compatible = "dragonfly,rk3576", "rockchip,rk3576";
+
+    pdmics: dummy-codec {
+        status = "okay";
+        compatible = "rockchip,dummy-codec";
+        #sound-dai-cells = <0>;
+    };
+
+    pdm_mic_array: pdm-mic-array {
+        status = "okay";
+        compatible = "simple-audio-card";
+        simple-audio-card,name = "rockchip,pdm-mic-array";
+        simple-audio-card,format = "pdm";
+        simple-audio-card,cpu {
+            sound-dai = <&pdm1>;
+            dai-tdm-slot-num = <2>;
+            dai-tdm-slot-width = <1>;
+        };
+        simple-audio-card,codec {
+            sound-dai = <&pdmics>;
+        };
+    };
+
+    usb_connector: usb-connector {
+        compatible = "gpio-usb-b-connector", "usb-b-connector";
+        label = "type-c-usb";
+        pinctrl-names = "default";
+        pinctrl-0 = <&usb_conn_det>;
+        vbus-gpios = <&gpio4 RK_PC1 GPIO_ACTIVE_LOW>;
+        status = "disabled";
+    };
+    
+    usb_vbus_extcon: extcon-usb {
+        compatible = "linux,extcon-usb-gpio";
+        pinctrl-names = "default";
+        pinctrl-0 = <&usb_conn_det>;
+        vbus-gpios = <&gpio4 RK_PC1 GPIO_ACTIVE_LOW>;
+    };
+};
+
+&spi4 {
+    status = "okay";
+    spi-max-frequency = <4000000>;
+    pinctrl-names = "default";
+    pinctrl-0 = <&spi4m3_pins &spi4m3_csn0>;
+
+    fbtft@0{
+        status = "okay";
+        compatible = "nv3007";
+        reg = <0>;
+        spi-max-frequency = <4000000>;
+        fps = <30>;
+        width = <428>;
+        height = <156>;
+        buswidth = <8>;
+        regwidth = <8>;
+        bpp = <16>;
+        debug = <0x4>;
+        dc-gpios = <&gpio3 RK_PA1 GPIO_ACTIVE_HIGH>;
+        reset-gpios = <&gpio3 RK_PA3 GPIO_ACTIVE_HIGH>;
+        backlight-gpios = <&gpio2 RK_PD4 GPIO_ACTIVE_HIGH>;
+    };
+};
+
+&sdmmc {
+       max-frequency = <200000000>;
+       no-sdio;
+       no-mmc;
+       bus-width = <4>;
+       cap-mmc-highspeed;
+       cap-sd-highspeed;
+       disable-wp;
+       sd-uhs-sdr104;
+       vqmmc-supply = <&vccio_sd_s0>;
+       status = "okay";
+};
+
+&pinctrl {
+     rtc {
+        rtc_int: rtc-int {
+            rockchip,pins = <0 RK_PA0 RK_FUNC_GPIO &pcfg_pull_up>;
+        };
+    };
+
+    usb_conn {
+        usb_conn_det: usb_conn_det {
+            rockchip,pins = <4 RK_PC1 RK_FUNC_GPIO &pcfg_pull_none>;
+        };
+    };
+
+    uart9 {
+        uart9_gpio: uart9-gpio {
+            rockchip,pins = <2 RK_PC0 RK_FUNC_GPIO &pcfg_pull_down>,
+                            <2 RK_PC1 RK_FUNC_GPIO &pcfg_pull_down>;
+        };
+    };
+};
+
+&i2c6 {
+    status = "okay";
+    pinctrl-0 = <&i2c6m3_xfer>;
+
+    om70x0x: om70X0X@38 {
+        compatible = "onmicro,om70X0X";
+        reg = <0x38>;
+        status = "okay";
+    };
+
+
+    hym8563: hym8563@51 {
+        compatible = "haoyu,hym8563";
+        reg = <0x51>;
+        #clock-cells = <0>;
+        clock-frequency = <32768>;
+        clock-output-names = "hym8563";
+        pinctrl-names = "default";
+        pinctrl-0 = <&rtc_int>;
+
+        interrupt-parent = <&gpio0>;
+        interrupts = <RK_PA0 IRQ_TYPE_LEVEL_LOW>;
+        wakeup-source;
+        status = "okay";
+    };
+};
+
+&pdm1 {
+    status = "okay";
+    rockchip,always-on;
+    pinctrl-names = "default";
+    rockchip,path-map = <1 1 1 1>;
+    pinctrl-0 = <&pdm1m1_sdi1 &pdm1m1_clk0>;
+};
+
+&wdt {
+    status = "okay";
+};

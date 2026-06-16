@@ -1,0 +1,38 @@
+#include <dt-bindings/usb/pd.h>
+#include <dt-bindings/phy/phy.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/display/rockchip_vop.h>
+
+&u2phy0 {
+    extcon = <&usb_vbus_extcon>;
+    status = "okay";
+};
+
+&u2phy0_otg {
+    rockchip,sel-pipe-phystatus;
+    rockchip,dis-u2-susphy;
+    rockchip,gpio-vbus-det;
+    status = "okay";
+};
+
+&usbdp_phy {
+    status = "disabled";
+};
+
+&usbdp_phy_dp {
+    status = "disabled";
+};
+
+&usbdp_phy_u3 {
+    status = "disabled";
+};
+
+&usb_drd0_dwc3 {
+    dr_mode = "peripheral";
+    phys = <&u2phy0_otg>;
+    phy-names = "usb2-phy";
+    extcon = <&usb_vbus_extcon>;
+    maximum-speed = "high-speed";
+    snps,dis_u2_susphy_quirk;
+    status = "okay";
+};
