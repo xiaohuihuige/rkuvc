@@ -116,6 +116,21 @@ static void session_do_teardown(struct uvc_session *session)
         session_do_attach(session);
 }
 
+static int session_attach_settle_ms(void)
+{
+    const char *env = getenv("UVC_ATTACH_SETTLE_MS");
+    int ms;
+
+    if (!env || !env[0])
+        return 400;
+    ms = atoi(env);
+    if (ms < 0)
+        ms = 0;
+    if (ms > 5000)
+        ms = 5000;
+    return ms;
+}
+
 static void session_cleanup_stale_gadget(int video_id)
 {
     if (video_id < 0)
@@ -188,8 +203,18 @@ static void session_do_attach(struct uvc_session *session)
 
     session_cleanup_stale_gadget(video_id);
 
-    if (video_id >= 0)
+    if (video_id >= 0) {
+        if (uvc_video_drain_gadget_thread(video_id) != 0) {
+            pthread_mutex_lock(&session->lock);
+            session->device_ready = false;
+            pthread_mutex_unlock(&session->lock);
+            printf("uvc session: gadget drain failed (video%d), wait for next attach\n",
+                   video_id);
+            return;
+        }
         uvc_video_force_uvc_node_idle(video_id);
+        usleep((useconds_t)session_attach_settle_ms() * 1000);
+    }
 
     add_uvc_video();
 

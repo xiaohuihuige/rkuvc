@@ -100,6 +100,8 @@ void uvc_video_bind_stop_wake(int id, int wake_write_fd);
 void uvc_video_set_gadget_fd(int id, int uvc_fd);
 void uvc_video_kill_gadget_fd(int id);
 void uvc_video_force_uvc_node_idle(int id);
+/** @return 0 when safe to start a new gadget thread, -1 if a prior thread is still running. */
+int uvc_video_drain_gadget_thread(int id);
 void uvc_set_user_fcc(unsigned int fcc, int id);
 unsigned int uvc_get_user_fcc(int id);
 void uvc_memset_uvc_user(int id);

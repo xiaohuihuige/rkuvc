@@ -925,6 +925,22 @@ uvc_video_fill_buffer(struct uvc_device *dev, struct v4l2_buffer *buf)
 
 
 
+static void uvc_video_usb_link_lost(struct uvc_device *dev, const char *where)
+{
+    if (errno != ENODEV && errno != ENXIO && errno != ESHUTDOWN && errno != EIO)
+        return;
+
+    if (dev->uvc_shutdown_requested)
+        return;
+
+    dev->uvc_shutdown_requested = 1;
+    dev->is_streaming = 0;
+    printf("%d: UVC: USB link lost during %s: %s (%d)\n",
+           dev->video_id, where, strerror(errno), errno);
+    uvc_control_exit();
+    uvc_set_user_run_state(false, dev->video_id);
+}
+
 static int
 uvc_video_process(struct uvc_device *dev)
 {
@@ -957,8 +973,13 @@ uvc_video_process(struct uvc_device *dev)
     if (dev->run_standalone) {
         /* UVC stanalone setup. */
         ret = ioctl(dev->uvc_fd, VIDIOC_DQBUF, &dev->ubuf);
-        if (ret < 0)
+        if (ret < 0) {
+            if (errno != EAGAIN)
+                uvc_video_usb_link_lost(dev, "VIDIOC_DQBUF");
+            if (dev->uvc_shutdown_requested)
+                return 0;
             return ret;
+        }
 
         dev->dqbuf_count++;
 
@@ -971,6 +992,9 @@ uvc_video_process(struct uvc_device *dev)
         if (ret < 0) {
             printf("%d: UVC: Unable to queue buffer: %s (%d).\n",
                    dev->video_id, strerror(errno), errno);
+            uvc_video_usb_link_lost(dev, "VIDIOC_QBUF");
+            if (dev->uvc_shutdown_requested)
+                return 0;
             return ret;
         }
 

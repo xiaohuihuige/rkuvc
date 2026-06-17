@@ -36,6 +36,7 @@
 
 extern "C" int uvc_gadget_force_uvc_node_idle(int video_id);
 
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -149,27 +150,116 @@ static void uvc_buffer_clear(struct uvc_buffer_list* uvc_buffer)
     pthread_mutex_unlock(&uvc_buffer->mutex);
 }
 
+static pthread_mutex_t mtx_orphan = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t orphan_gadget_tid;
+static int orphan_gadget_vid = -1;
+
+static void uvc_video_orphan_register(int id, pthread_t tid)
+{
+    pthread_mutex_lock(&mtx_orphan);
+    orphan_gadget_tid = tid;
+    orphan_gadget_vid = id;
+    pthread_mutex_unlock(&mtx_orphan);
+}
+
+static void uvc_video_orphan_clear(pthread_t tid)
+{
+    pthread_mutex_lock(&mtx_orphan);
+    if (orphan_gadget_tid && pthread_equal(orphan_gadget_tid, tid)) {
+        orphan_gadget_tid = 0;
+        orphan_gadget_vid = -1;
+    }
+    pthread_mutex_unlock(&mtx_orphan);
+}
+
+static int uvc_video_gadget_drain_ms(void)
+{
+    const char *env = getenv("UVC_GADGET_DRAIN_MS");
+    int ms;
+
+    if (!env || !env[0])
+        return 3000;
+    ms = atoi(env);
+    if (ms < 500)
+        ms = 500;
+    if (ms > 15000)
+        ms = 15000;
+    return ms;
+}
+
+static bool uvc_video_try_reap_orphan(int id)
+{
+    pthread_t tid = 0;
+
+    pthread_mutex_lock(&mtx_orphan);
+    if (orphan_gadget_vid == id && orphan_gadget_tid)
+        tid = orphan_gadget_tid;
+    pthread_mutex_unlock(&mtx_orphan);
+
+    if (!tid)
+        return true;
+
+    if (pthread_tryjoin_np(tid, NULL) == 0) {
+        uvc_video_orphan_clear(tid);
+        return true;
+    }
+
+    return false;
+}
+
+int uvc_video_drain_gadget_thread(int id)
+{
+    const int step_ms = 50;
+    int waited = 0;
+    int max_ms = uvc_video_gadget_drain_ms();
+
+    while (waited < max_ms) {
+        if (uvc_video_try_reap_orphan(id))
+            return 0;
+
+        uvc_gadget_force_uvc_node_idle(id);
+        usleep((useconds_t)step_ms * 1000);
+        waited += step_ms;
+    }
+
+    if (uvc_video_try_reap_orphan(id))
+        return 0;
+
+    printf("uvc video: drain timeout id=%d (refusing new gadget until thread exits)\n", id);
+    return -1;
+}
+
 static void* uvc_gadget_pthread(void* arg)
 {
-    int *id = (int *)arg;
+    int id = *(int *)arg;
+
+    free(arg);
 
     prctl(PR_SET_NAME, "uvc_gadget_pthread", 0, 0, 0);
 
-    uvc_gadget_main(*id);
-    uvc_set_user_run_state(false, *id);
+    uvc_gadget_main(id);
+    uvc_set_user_run_state(false, id);
     pthread_exit(NULL);
 }
 
 int uvc_gadget_pthread_create(int *id)
 {
     pthread_t *pid = NULL;
+    int *thread_id;
 
     uvc_memset_uvc_user(*id);
-    if ((pid = uvc_video_get_uvc_pid(*id))) {
-        if (pthread_create(pid, NULL, uvc_gadget_pthread, id)) {
-            printf("create uvc_gadget_pthread fail!\n");
-            return -1;
-        }
+    if (!(pid = uvc_video_get_uvc_pid(*id)))
+        return -1;
+
+    thread_id = (int *)malloc(sizeof(int));
+    if (!thread_id)
+        return -1;
+    *thread_id = *id;
+
+    if (pthread_create(pid, NULL, uvc_gadget_pthread, thread_id)) {
+        printf("create uvc_gadget_pthread fail!\n");
+        free(thread_id);
+        return -1;
     }
     return 0;
 }
@@ -207,6 +297,9 @@ int uvc_video_id_add(int id)
     int ret = 0;
 
     printf("add uvc video id: %d\n", id);
+
+    if (uvc_video_drain_gadget_thread(id) != 0)
+        return -1;
 
     pthread_mutex_lock(&mtx_v);
     if (!_uvc_video_id_check(id)) {
@@ -375,7 +468,7 @@ pthread_t* uvc_video_get_uvc_pid(int id)
 void uvc_video_join_uvc_pid(int id)
 {
     const int try_ms = 10;
-    const int try_max = 500;
+    const int try_max = 1500;
     int t;
 
     for (t = 0; t < try_max; t++) {
@@ -424,7 +517,7 @@ void uvc_video_join_uvc_pid(int id)
     uvc_video_kill_gadget_fd(id);
     uvc_gadget_force_uvc_node_idle(id);
 
-    for (t = 0; t < 300; t++) {
+    for (t = 0; t < 1000; t++) {
         pthread_t pid = 0;
         bool have = false;
 
@@ -476,6 +569,7 @@ void uvc_video_join_uvc_pid(int id)
                 pthread_t pid = l->uvc_pid;
 
                 printf("uvc video: detach stuck gadget thread id=%d\n", id);
+                uvc_video_orphan_register(id, pid);
                 uvc_gadget_force_uvc_node_idle(id);
                 pthread_detach(pid);
                 l->uvc_pid = 0;
@@ -495,6 +589,8 @@ static void uvc_gadget_pthread_exit(int id)
         wait_ms += 5;
     }
     uvc_set_user_run_state(false, id);
+    uvc_video_kill_gadget_fd(id);
+    uvc_gadget_force_uvc_node_idle(id);
     uvc_video_join_uvc_pid(id);
 }
 
