@@ -8,6 +8,7 @@
 #define UVC_GADGET_INTERNAL_H
 
 #include "uvc-gadget.h"
+#include "rkuvc.h"
 
 #include <errno.h>
 #include <linux/videodev2.h>
@@ -67,6 +68,13 @@ int uvc_gadget_uvc_release_buffers(struct uvc_device *dev);
 
 /** STREAMOFF + REQBUFS(0) on /dev/videoN (recover from zombie gadget). */
 int uvc_gadget_force_uvc_node_idle(int video_id);
+
+/** Fill @cfg with the union of supported resolutions + frame rates. */
+void uvc_gadget_fill_sys_config(struct uvc_config *cfg);
+
+/** True if (fcc, w, h, fps) is an advertised combo. */
+bool uvc_gadget_config_supported(unsigned int fcc, unsigned int w,
+                                 unsigned int h, int fps);
 
 void uvc_gadget_apply_config(struct uvc_gadget_runtime *rt);
 

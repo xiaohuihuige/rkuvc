@@ -42,6 +42,14 @@ int uvc_control_video_id(unsigned seq);
 int check_uvc_video_id(void);
 void uvc_control_init(int width, int height, int fcc, int fps);
 void uvc_control_exit(void);
+void uvc_control_release_buffer(int dmabuf_fd);
+
+/**
+ * If uvc_set_config() has been called, copy the configured default w/h/fcc/fps
+ * into the out-params and return true; otherwise return false (caller uses
+ * the built-in defaults). @fcc receives the V4L2 pixelformat fourcc.
+ */
+bool uvc_control_get_default_config(int *w, int *h, int *fcc, int *fps);
 bool uvc_control_host_streaming(void);
 int get_uvc_streaming_intf(void);
 int uvc_control_run(uint32_t flags);

@@ -31,14 +31,16 @@
  */
 
 #include "uvc_encode.h"
+#include "uvc_log.h"
 #include "uvc_video.h"
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 int uvc_encode_init(struct uvc_encode *e, int width, int height,int fcc)
 {
-    printf("%s: width = %d, height = %d, fcc = %d\n", __func__, width, height,fcc);
+    uvc_log_printf("%s: width = %d, height = %d, fcc = %d\n", __func__, width, height,fcc);
     memset(e, 0, sizeof(*e));
     e->video_id = -1;
     e->width = -1;
@@ -67,11 +69,40 @@ bool uvc_encode_process(struct uvc_encode *e, void *virt, int fd, size_t size)
     int jpeg_quant;
     void* hnd = NULL;
 
-    if (!uvc_get_user_run_state(e->video_id) || !uvc_buffer_write_enable(e->video_id))
+    if (!uvc_get_user_run_state(e->video_id)) {
+        if (fd >= 0)
+            uvc_video_release_dmabuf(e->video_id, fd);
         return false;
+    }
 
     uvc_get_user_resolution(&width, &height, e->video_id);
     fcc = uvc_get_user_fcc(e->video_id);
+    if (fd >= 0 && fcc != V4L2_PIX_FMT_YUYV && !e->extra_size) {
+        ret = uvc_video_queue_dmabuf(e->video_id, fd, size);
+        if (ret == 0)
+            return true;
+        if (ret == -EAGAIN) {
+            uvc_video_release_dmabuf(e->video_id, fd);
+            return true;
+        }
+        if (ret == -EBUSY)
+            return true;
+        /* Some UVC V4L2 drivers reject a compressed frame DMA-BUF with
+         * EINVAL (for example when bytesused is smaller than the plane).
+         * Keep the mapped pointer path available for that case. */
+        if (ret != -EOPNOTSUPP && ret != -ENODEV && ret != -EINVAL) {
+            uvc_log_printf("%s: DMABUF queue failed: %d\n", __func__, ret);
+            uvc_video_release_dmabuf(e->video_id, fd);
+            return true;
+        }
+    }
+
+    if (!uvc_buffer_write_enable(e->video_id)) {
+        if (fd >= 0)
+            uvc_video_release_dmabuf(e->video_id, fd);
+        return false;
+    }
+
     switch (fcc) {
     case V4L2_PIX_FMT_YUYV:
         if (virt)
@@ -86,9 +117,12 @@ bool uvc_encode_process(struct uvc_encode *e, void *virt, int fd, size_t size)
             uvc_buffer_write(0, NULL, 0, virt, size, fcc, e->video_id);
         break;
     default:
-        printf("%s: not support fcc: %u\n", __func__, fcc);
+        uvc_log_printf("%s: not support fcc: %u\n", __func__, fcc);
         break;
     }
+
+    if (fd >= 0)
+        uvc_video_release_dmabuf(e->video_id, fd);
 
     return true;
 }

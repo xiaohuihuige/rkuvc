@@ -41,6 +41,7 @@
 #include <libdrm/drm.h>
 #include <libdrm/drm_mode.h>
 #include "drm.h"
+#include "uvc_log.h"
 
 #define DRM_DEVICE "/dev/dri/card0"
 
@@ -49,7 +50,7 @@ int drm_open(void)
     int fd;
     fd = open(DRM_DEVICE, O_RDWR);
     if (fd < 0) {
-        printf("open %s failed!\n", DRM_DEVICE);
+        uvc_log_printf("open %s failed!\n", DRM_DEVICE);
         return -1;
     }
     return fd;
@@ -114,13 +115,13 @@ void *drm_map_buffer(int fd, unsigned int handle, size_t len)
 
     ret = drm_ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &dmmd);
     if (ret) {
-        printf("map_dumb failed: %s\n", strerror(ret));
+        uvc_log_printf("map_dumb failed: %s\n", strerror(ret));
         return NULL;
     }
 
     buf = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, dmmd.offset);
     if (buf == MAP_FAILED) {
-        printf("mmap failed: %s\n", strerror(errno));
+        uvc_log_printf("mmap failed: %s\n", strerror(errno));
         return NULL;
     }
 
@@ -153,7 +154,7 @@ int drm_handle_to_fd(int fd, unsigned int handle, int *map_fd, unsigned int flag
     *map_fd = dph.fd;
 
     if (*map_fd < 0) {
-        printf("map ioctl returned negative fd\n");
+        uvc_log_printf("map ioctl returned negative fd\n");
         return -EINVAL;
     }
 

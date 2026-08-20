@@ -31,7 +31,9 @@
  */
 
 #include "uvc_video.h"
+#include "uvc_log.h"
 #include "uvc-gadget.h"
+#include "uvc_control.h"
 #include "yuv.h"
 
 extern "C" int uvc_gadget_force_uvc_node_idle(int video_id);
@@ -225,7 +227,7 @@ int uvc_video_drain_gadget_thread(int id)
     if (uvc_video_try_reap_orphan(id))
         return 0;
 
-    printf("uvc video: drain timeout id=%d (refusing new gadget until thread exits)\n", id);
+    uvc_log_printf("uvc video: drain timeout id=%d (refusing new gadget until thread exits)\n", id);
     return -1;
 }
 
@@ -257,7 +259,7 @@ int uvc_gadget_pthread_create(int *id)
     *thread_id = *id;
 
     if (pthread_create(pid, NULL, uvc_gadget_pthread, thread_id)) {
-        printf("create uvc_gadget_pthread fail!\n");
+        uvc_log_printf("create uvc_gadget_pthread fail!\n");
         free(thread_id);
         return -1;
     }
@@ -296,7 +298,7 @@ int uvc_video_id_add(int id)
 {
     int ret = 0;
 
-    printf("add uvc video id: %d\n", id);
+    uvc_log_printf("add uvc video id: %d\n", id);
 
     if (uvc_video_drain_gadget_thread(id) != 0)
         return -1;
@@ -316,11 +318,11 @@ int uvc_video_id_add(int id)
             pthread_mutex_init(&v->user_mutex, NULL);
             ret = 0;
         } else {
-            printf("%s: %d: memory alloc fail.\n", __func__, __LINE__);
+            uvc_log_printf("%s: %d: memory alloc fail.\n", __func__, __LINE__);
             ret = -1;
         }
     } else {
-        printf("%s: %d: %d already exist.\n", __func__, __LINE__, id);
+        uvc_log_printf("%s: %d: %d already exist.\n", __func__, __LINE__, id);
         ret = -1;
     }
     pthread_mutex_unlock(&mtx_v);
@@ -513,7 +515,7 @@ void uvc_video_join_uvc_pid(int id)
         usleep((useconds_t)try_ms * 1000);
     }
 
-    printf("uvc video: join timeout id=%d, forcing shutdown\n", id);
+    uvc_log_printf("uvc video: join timeout id=%d, forcing shutdown\n", id);
     uvc_video_kill_gadget_fd(id);
     uvc_gadget_force_uvc_node_idle(id);
 
@@ -568,7 +570,7 @@ void uvc_video_join_uvc_pid(int id)
             if (id == l->id && l->uvc_pid) {
                 pthread_t pid = l->uvc_pid;
 
-                printf("uvc video: detach stuck gadget thread id=%d\n", id);
+                uvc_log_printf("uvc video: detach stuck gadget thread id=%d\n", id);
                 uvc_video_orphan_register(id, pid);
                 uvc_gadget_force_uvc_node_idle(id);
                 pthread_detach(pid);
@@ -607,6 +609,46 @@ void uvc_video_set_gadget_fd(int id, int uvc_fd)
         }
     }
     pthread_mutex_unlock(&mtx_v);
+}
+
+void uvc_video_bind_gadget(int id, struct uvc_device *dev)
+{
+    pthread_mutex_lock(&mtx_v);
+    if (_uvc_video_id_check(id)) {
+        for (std::list<struct uvc_video*>::iterator i = lst_v.begin(); i != lst_v.end(); ++i) {
+            struct uvc_video* video = *i;
+            if (id == video->id) {
+                video->gadget_dev = dev;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&mtx_v);
+}
+
+int uvc_video_queue_dmabuf(int id, int fd, size_t size)
+{
+    struct uvc_device *dev = NULL;
+
+    pthread_mutex_lock(&mtx_v);
+    if (_uvc_video_id_check(id)) {
+        for (std::list<struct uvc_video*>::iterator i = lst_v.begin(); i != lst_v.end(); ++i) {
+            struct uvc_video* video = *i;
+            if (id == video->id) {
+                dev = video->gadget_dev;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&mtx_v);
+
+    return dev ? uvc_gadget_queue_dmabuf(dev, fd, size) : -ENODEV;
+}
+
+void uvc_video_release_dmabuf(int id, int fd)
+{
+    (void)id;
+    uvc_control_release_buffer(fd);
 }
 
 void uvc_video_kill_gadget_fd(int id)
@@ -661,7 +703,7 @@ static int _uvc_buffer_init(struct uvc_video *v)
     pthread_mutex_init(&v->uvc->read.mutex, NULL);
     uvc_buffer_clear(&v->uvc->write);
     uvc_buffer_clear(&v->uvc->read);
-    printf("UVC_BUFFER_NUM = %d\n", UVC_BUFFER_NUM);
+    uvc_log_printf("UVC_BUFFER_NUM = %d\n", UVC_BUFFER_NUM);
     for (i = 0; i < UVC_BUFFER_NUM; i++) {
         buffer = uvc_buffer_create(width, height, v->id);
         if (!buffer) {
@@ -872,7 +914,7 @@ static void _uvc_set_user_resolution(struct uvc_video *v, int width, int height)
     pthread_mutex_lock(&v->user_mutex);
     v->uvc_user.width = width;
     v->uvc_user.height = height;
-    printf("uvc_user.width = %u, uvc_user.height = %u\n", v->uvc_user.width,
+    uvc_log_printf("uvc_user.width = %u, uvc_user.height = %u\n", v->uvc_user.width,
            v->uvc_user.height);
     pthread_mutex_unlock(&v->user_mutex);
 }

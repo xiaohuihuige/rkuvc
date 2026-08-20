@@ -64,6 +64,7 @@ struct uvc_video {
     pthread_mutex_t user_mutex;
     struct uvc_user uvc_user;
     struct uvc_buffer* buffer_s;
+    struct uvc_device *gadget_dev;
     /** Write end of gadget epoll stop pipe (-1 if none). */
     int stop_wake_wfd;
     /** UVC gadget V4L2 fd for forced shutdown (-1 if none). */
@@ -98,6 +99,9 @@ void uvc_set_user_run_state(bool state, int id);
 /** Bind write end of pipe/eventfd to wake gadget epoll on stop (fd=-1 to clear). */
 void uvc_video_bind_stop_wake(int id, int wake_write_fd);
 void uvc_video_set_gadget_fd(int id, int uvc_fd);
+void uvc_video_bind_gadget(int id, struct uvc_device *dev);
+int uvc_video_queue_dmabuf(int id, int fd, size_t size);
+void uvc_video_release_dmabuf(int id, int fd);
 void uvc_video_kill_gadget_fd(int id);
 void uvc_video_force_uvc_node_idle(int id);
 /** @return 0 when safe to start a new gadget thread, -1 if a prior thread is still running. */

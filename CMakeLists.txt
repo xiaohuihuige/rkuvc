@@ -1,11 +1,6 @@
 cmake_minimum_required(VERSION 2.8.0 FATAL_ERROR)
 PROJECT(uvc_app)
 
-# 设置交叉编译工具链路径
-SET(CMAKE_C_COMPILER /home/wmh/falcon/Omni3576-sdk/buildroot/output/rockchip_rk3576_ipc/host/bin/aarch64-buildroot-linux-gnu-gcc)
-SET(CMAKE_CXX_COMPILER /home/wmh/falcon/Omni3576-sdk/buildroot/output/rockchip_rk3576_ipc/host/bin/aarch64-buildroot-linux-gnu-g++)
-SET(CMAKE_STRIP /home/wmh/falcon/Omni3576-sdk/buildroot/output/rockchip_rk3576_ipc/host/bin/aarch64-buildroot-linux-gnu-strip)
-
 include_directories(uvc)
 
 set(LIB_SOURCE
@@ -23,23 +18,23 @@ set(LIB_SOURCE
     uvc/uvc_app.c
     uvc/uvc_epoll.c
     uvc/drm.c
+    uvc/uvc_log.c
 )
 add_library(rkuvc SHARED ${LIB_SOURCE})
 target_link_libraries(rkuvc pthread drm)
 
-set(SOURCE
-    main.c
-    ${LIB_SOURCE}
-)
-
-ADD_EXECUTABLE(uvc_app ${SOURCE})
-target_link_libraries(uvc_app pthread drm)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.c")
+    add_executable(uvc_app main.c ${LIB_SOURCE})
+    target_link_libraries(uvc_app pthread drm)
+endif()
 
 install(TARGETS rkuvc DESTINATION lib)
 install(DIRECTORY ./uvc DESTINATION include
         FILES_MATCHING PATTERN "*.h")
 
-install(TARGETS uvc_app DESTINATION bin)
+if(TARGET uvc_app)
+    install(TARGETS uvc_app DESTINATION bin)
+endif()
 
 if(RK3588)
 install(FILES rk3588/usb_config.sh DESTINATION bin

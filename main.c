@@ -1,75 +1,74 @@
-#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <pthread.h>
-#include <linux/videodev2.h>
-
-#include "rkuvc.h"
+#include "uvc_control.h"
+#include "uvc_video.h"
 #include "drm.h"
 
-#define ALIGN(x, a) (((x) + (a)-1) & ~((a)-1))
+#define ALIGN(x, a)         (((x)+(a)-1)&~((a)-1))
 
-struct uvc_camera_ctx {
-    int width;
-    int height;
-    int fcc;
-    int fps;
-    pthread_t thread;
-    bool run;
-    bool thread_active;
-};
-
-static void fill_image(uint8_t *buf, uint32_t width, uint32_t height,
-                       uint32_t hor_stride, uint32_t ver_stride)
-{
+static void fill_nv12(uint8_t *buf, uint32_t width, uint32_t height,
+                      uint32_t hor_stride, uint32_t ver_stride) {
     uint8_t *buf_y = buf;
     uint32_t x, y;
+    const uint32_t frame_count = 0;
+
     uint8_t *p = buf_y;
 
     for (y = 0; y < height; y++, p += hor_stride) {
-        for (x = 0; x < width; x++)
-            p[x] = (uint8_t)(x + y);
+        for (x = 0; x < width; x++) {
+            p[x] = x + y + frame_count * 3;
+        }
     }
 
     p = buf + hor_stride * ver_stride;
     for (y = 0; y < height / 2; y++, p += hor_stride) {
         for (x = 0; x < width / 2; x++) {
-            p[x * 2 + 0] = (uint8_t)(128 + y);
-            p[x * 2 + 1] = (uint8_t)(64 + x);
+            p[x * 2 + 0] = 128 + y + frame_count * 2;
+            p[x * 2 + 1] = 64  + x + frame_count * 5;
         }
     }
 }
 
-static int camera_load_mjpeg(struct uvc_camera_ctx *ctx, char *buffer, size_t *size)
+static void fill_yuyv(uint8_t *buf, uint32_t width, uint32_t height)
 {
-    char file_name[128];
-    struct stat st;
+    uint32_t x, y;
 
-    snprintf(file_name, sizeof(file_name), "%dx%d.jpg", ctx->width, ctx->height);
-    if (access(file_name, F_OK)) {
-        printf("file %s not exist.\n", file_name);
-        return -1;
+    for (y = 0; y < height; ++y) {
+        uint8_t *line = buf + y * width * 2;
+        for (x = 0; x < width; x += 2) {
+            line[x * 2 + 0] = (uint8_t)(x + y);
+            line[x * 2 + 1] = 128;
+            line[x * 2 + 2] = (uint8_t)(x + y + 1);
+            line[x * 2 + 3] = 128;
+        }
     }
-    if (stat(file_name, &st) != 0)
-        return -1;
-
-    {
-        FILE *fp = fopen(file_name, "rb");
-
-        if (!fp)
-            return -1;
-        *size = st.st_size;
-        fread(buffer, 1, *size, fp);
-        fclose(fp);
-    }
-    return 0;
 }
 
-static int camera_run_loop(struct uvc_camera_ctx *ctx)
+struct camera_param {
+    int width;
+    int height;
+    int fcc;
+    int fps;
+};
+
+static struct camera_param g_param;
+static pthread_t g_th;
+static bool g_run;
+static volatile sig_atomic_t g_exit;
+
+static void handle_signal(int sig)
+{
+    (void)sig;
+    g_exit = 1;
+}
+
+int run_uvc(int width, int height, int fcc, int fps)
 {
     int fd;
     int ret;
@@ -77,115 +76,131 @@ static int camera_run_loop(struct uvc_camera_ctx *ctx)
     char *buffer;
     int handle_fd;
     size_t size;
+    char file_name[128];
+
+    snprintf(file_name, sizeof(file_name), "%dx%d.jpg", width, height);
+    if (fcc == V4L2_PIX_FMT_MJPEG) {
+        if (access(file_name, F_OK)) {
+            fprintf(stderr, "file %s not exist\n", file_name);
+            return -1;
+        }
+    }
 
     fd = drm_open();
     if (fd < 0)
         return -1;
 
-    size = ALIGN(ctx->width, 16) * ALIGN(ctx->height, 16) * 3 / 2;
+    size = ALIGN(width, 16) * ALIGN(height, 16) *
+           (fcc == V4L2_PIX_FMT_YUYV ? 2 : 3) / 2;
     ret = drm_alloc(fd, size, 16, &handle, 0);
     if (ret)
-        goto err_close;
+        goto close_drm;
 
     ret = drm_handle_to_fd(fd, handle, &handle_fd, 0);
     if (ret)
-        goto err_free;
+        goto free_drm;
 
-    buffer = (char *)drm_map_buffer(fd, handle, size);
+    buffer = (char*)drm_map_buffer(fd, handle, size);
     if (!buffer) {
-        ret = -1;
-        goto err_free;
+        printf("drm map buffer fail.\n");
+        goto free_drm;
     }
 
-    if (ctx->fcc == V4L2_PIX_FMT_MJPEG) {
-        if (camera_load_mjpeg(ctx, buffer, &size) != 0) {
-            ret = -1;
-            goto err_unmap;
+    if (fcc == V4L2_PIX_FMT_MJPEG) {
+        struct stat st;
+        if (stat(file_name, &st) == 0 && (size_t)st.st_size <= size) {
+            FILE *fp = fopen(file_name, "rb");
+            if (fp) {
+                size_t read_size;
+
+                size = (size_t)st.st_size;
+                read_size = fread(buffer, 1, size, fp);
+                fclose(fp);
+                if (read_size != size) {
+                    fprintf(stderr, "read %s failed\n", file_name);
+                    goto free_drm;
+                }
+            }
         }
+    } else if (fcc == V4L2_PIX_FMT_YUYV) {
+        fill_yuyv((uint8_t *)buffer, (uint32_t)width, (uint32_t)height);
+        size = (size_t)width * (size_t)height * 2;
     } else {
-        fill_image((uint8_t *)buffer, ctx->width, ctx->height,
-                   ctx->width, ctx->height);
+        fill_nv12((uint8_t *)buffer, (uint32_t)width, (uint32_t)height,
+                  (uint32_t)width, (uint32_t)height);
     }
 
-    while (ctx->run)
+    while (g_run) {
         uvc_read_camera_buffer(buffer, handle_fd, size, NULL, 0);
+        if (fps > 0)
+            usleep((useconds_t)(1000000u / (unsigned int)fps));
+    }
 
-err_unmap:
     drm_unmap_buffer(buffer, size);
-err_free:
+    ret = 0;
+free_drm:
     drm_free(fd, handle);
-err_close:
+close_drm:
     drm_close(fd);
     return ret;
 }
 
-static void *camera_thread_entry(void *arg)
+static void *uvc_thread(void *arg)
 {
-    struct uvc_camera_ctx *ctx = arg;
-
-    camera_run_loop(ctx);
-    return NULL;
+    struct camera_param *param = (struct camera_param *)arg;
+    run_uvc(param->width, param->height, param->fcc, param->fps);
+    pthread_exit(NULL);
 }
 
-static int camera_open(void *userdata, int width, int height, int fcc, int fps)
+static int open_uvc(void *userdata, int width, int height, int fcc, int fps)
 {
-    printf("camera_open\n");
-
-    struct uvc_camera_ctx *ctx = userdata;
-    int ret;
-
-    if (ctx->thread_active)
+    (void)userdata;
+    if (g_run)
         return 0;
-
-    ctx->width = width;
-    ctx->height = height;
-    ctx->fcc = fcc;
-    ctx->fps = fps;
-    ctx->run = true;
-    ret = pthread_create(&ctx->thread, NULL, camera_thread_entry, ctx);
-    if (ret == 0)
-        ctx->thread_active = true;
-    return ret;
+    g_run = true;
+    g_param.width = width;
+    g_param.height = height;
+    g_param.fcc = fcc;
+    g_param.fps = fps;
+    return pthread_create(&g_th, NULL, uvc_thread, &g_param);
 }
 
-static void camera_close(void *userdata)
+static void close_uvc(void *userdata)
 {
-    printf("camera_close\n");
-    struct uvc_camera_ctx *ctx = userdata;
-
-    if (!ctx->thread_active)
+    (void)userdata;
+    if (!g_run)
         return;
-
-    ctx->run = false;
-    pthread_join(ctx->thread, NULL);
-    ctx->thread_active = false;
+    g_run = false;
+    pthread_join(g_th, NULL);
 }
 
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
-    struct uvc_app *app;
-    struct uvc_camera_ctx camera;
-
     (void)argc;
     (void)argv;
 
-    memset(&camera, 0, sizeof(camera));
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
-    register_uvc_open_camera(camera_open, &camera);
-    register_uvc_close_camera(camera_close, &camera);
+    register_uvc_open_camera(open_uvc, NULL);
+    register_uvc_close_camera(close_uvc, NULL);
 
-    app = uvc_app_create();
-    if (!app)
-        return -1;
-
-    if (uvc_app_run(app, 0) != 0) {
-        uvc_app_destroy(app);
-        return -1;
+    /* Keep the demo's producer configuration aligned with the supplied JPEG. */
+    if (uvc_set_config(1080, 1920, UVC_FMT_MJPEG, 30) != 0) {
+        fprintf(stderr, "uvc_set_config failed\n");
+        uvc_control_module_close();
+        return 1;
     }
 
-    while (1)
-        sleep(5);
+    if (uvc_control_run(0) != 0) {
+        fprintf(stderr, "uvc_control_run failed\n");
+        uvc_control_module_close();
+        return 1;
+    }
 
-    uvc_app_destroy(app);
+    while (!g_exit)
+        pause();
+
+    uvc_control_join(0);
     return 0;
 }

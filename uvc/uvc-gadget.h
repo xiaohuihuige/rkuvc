@@ -36,6 +36,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <pthread.h>
 
 #include <linux/ioctl.h>
 #include <linux/types.h>
@@ -81,6 +82,7 @@ struct uvc_event {
 enum io_method {
     IO_METHOD_MMAP,
     IO_METHOD_USERPTR,
+    IO_METHOD_DMABUF,
 };
 
 struct buffer {
@@ -143,10 +145,17 @@ struct uvc_device {
     uint8_t cs;
     uint8_t entity_id;
     struct v4l2_buffer ubuf;
+
+    pthread_mutex_t dmabuf_lock;
+    int *dmabuf_fds;
+    int *dmabuf_source_fds;
+    bool *dmabuf_queued;
+    bool dmabuf_ready;
 };
 
 int uvc_gadget_run(int video_id);
 int uvc_gadget_main(int video_id);
+int uvc_gadget_queue_dmabuf(struct uvc_device *dev, int fd, size_t size);
 
 #ifdef __cplusplus
 }

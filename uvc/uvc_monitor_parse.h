@@ -34,6 +34,8 @@ int uvc_monitor_uevent_decode(char *buf, int len, struct uvc_uevent_msg *msg);
 
 bool uvc_monitor_uevent_is_extcon0_change(const struct uvc_uevent_msg *msg);
 
+bool uvc_monitor_uevent_is_android_usb_change(const struct uvc_uevent_msg *msg);
+
 bool uvc_monitor_extcon_stream_ready(void);
 
 void uvc_monitor_extcon_publish(struct uvc_monitor_extcon *ext);

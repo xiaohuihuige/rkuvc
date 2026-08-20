@@ -5,6 +5,7 @@
  */
 
 #include "uvc_monitor_parse.h"
+#include "uvc_log.h"
 
 #include <fcntl.h>
 #include <stdio.h>
@@ -92,6 +93,26 @@ bool uvc_monitor_uevent_is_extcon0_change(const struct uvc_uevent_msg *msg)
 
     devpath = uvc_monitor_uevent_get_value(msg, "DEVPATH");
     return devpath_is_extcon0(devpath);
+}
+
+bool uvc_monitor_uevent_is_android_usb_change(const struct uvc_uevent_msg *msg)
+{
+    const char *action;
+    const char *subsystem;
+    const char *state;
+
+    if (!msg || msg->size <= 0)
+        return false;
+
+    action = uvc_monitor_uevent_get_value(msg, "ACTION");
+    subsystem = uvc_monitor_uevent_get_value(msg, "SUBSYSTEM");
+    state = uvc_monitor_uevent_get_value(msg, "USB_STATE");
+    if (!action || strcmp(action, "change") != 0 ||
+        !subsystem || strcmp(subsystem, "android_usb") != 0 || !state)
+        return false;
+
+    return !strcmp(state, "CONFIGURED") || !strcmp(state, "DISCONNECTED") ||
+           !strcmp(state, "DISCONNECT");
 }
 
 static const char *cable0_state_path(void)
@@ -245,7 +266,7 @@ bool uvc_monitor_extcon_stream_ready(void)
     c3 = sysfs_text_key_is_one(cable3, "SDP");
 
     if (getenv("UVC_EXTCON_VERBOSE"))
-        printf("uvc monitor extcon: cable.0=%s (%d)  cable.3=%s (%d)\n",
+        uvc_log_printf("uvc monitor extcon: cable.0=%s (%d)  cable.3=%s (%d)\n",
                cable0, c0 ? 1 : 0, cable3, c3 ? 1 : 0);
 
     return c0 && c3;
@@ -286,7 +307,7 @@ void uvc_monitor_extcon_publish(struct uvc_monitor_extcon *ext)
         if (!was_off)
             return;
 
-        printf("uvc monitor extcon: UVC connected (cable.0=1 and cable.3=1)\n");
+        uvc_log_printf("uvc monitor extcon: UVC connected (cable.0=1 and cable.3=1)\n");
         ev.video_id = -1;
         ev.type = UVC_EVENT_USB_ATTACHED;
         uvc_event_publish(ext->bus, &ev);
@@ -315,7 +336,7 @@ void uvc_monitor_extcon_publish(struct uvc_monitor_extcon *ext)
 
     ev.video_id = -1;
     ev.type = UVC_EVENT_USB_DETACHED;
-    printf("uvc monitor extcon: UVC disconnected (cable.0/cable.3 not both 1)\n");
+    uvc_log_printf("uvc monitor extcon: UVC disconnected (cable.0/cable.3 not both 1)\n");
     uvc_event_publish(ext->bus, &ev);
 }
 
@@ -339,18 +360,44 @@ void uvc_monitor_dispatch_uevent(struct uvc_event_bus *bus,
     const char *action;
     const char *devpath;
     const char *devname;
+    const char *state;
+    struct uvc_event ev;
 
     if (!bus || !extcon || !msg)
         return;
 
-    if (!uvc_monitor_uevent_is_extcon0_change(msg))
+    if (uvc_monitor_uevent_is_android_usb_change(msg)) {
+        state = uvc_monitor_uevent_get_value(msg, "USB_STATE");
+        ev.video_id = -1;
+        ev.type = !strcmp(state, "CONFIGURED") ? UVC_EVENT_USB_ATTACHED
+                                                : UVC_EVENT_USB_DETACHED;
+        uvc_log_printf("uvc monitor: android_usb USB_STATE=%s\n", state);
+        uvc_event_publish(bus, &ev);
         return;
+    }
 
     action = uvc_monitor_uevent_get_value(msg, "ACTION");
     devpath = uvc_monitor_uevent_get_value(msg, "DEVPATH");
+    if (devpath && strstr(devpath, "/gadget.0/video4linux/") && action) {
+        ev.video_id = -1;
+        if (!strcmp(action, "remove"))
+            ev.type = UVC_EVENT_USB_DETACHED;
+        else if (!strcmp(action, "add"))
+            ev.type = UVC_EVENT_USB_ATTACHED;
+        else
+            return;
+        uvc_log_printf("uvc monitor: gadget video node %s (%s)\n",
+                       action, devpath);
+        uvc_event_publish(bus, &ev);
+        return;
+    }
+
+    if (!uvc_monitor_uevent_is_extcon0_change(msg))
+        return;
+
     devname = uvc_monitor_uevent_get_value(msg, "DEVNAME");
     if (getenv("UVC_EXTCON_VERBOSE"))
-        printf("uvc monitor: extcon0 uevent ACTION=%s DEVNAME=%s DEVPATH=%s\n",
+        uvc_log_printf("uvc monitor: extcon0 uevent ACTION=%s DEVNAME=%s DEVPATH=%s\n",
                action ? action : "?",
                devname ? devname : "?",
                devpath ? devpath : "?");

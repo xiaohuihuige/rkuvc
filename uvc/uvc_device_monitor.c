@@ -5,10 +5,12 @@
  */
 
 #include "uvc_device_monitor.h"
+#include "uvc_log.h"
 
 #include "uvc_monitor_parse.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -30,6 +32,7 @@ struct uvc_device_monitor {
     bool started;
     pthread_t tid;
     int wake_pipe[2];
+    bool rebind_requested;
 };
 
 struct monitor_nl_io {
@@ -86,8 +89,10 @@ static void monitor_netlink_handler(int fd, uint32_t revents, void *userdata)
         return;
 
     len = recvmsg(fd, &io->msg, 0);
-    if (len < 0)
+    if (len < 0) {
+        uvc_log_printf("uvc monitor: recvmsg failed: %s (%d)\n", strerror(errno), errno);
         return;
+    }
 
     if (len < (int)sizeof(io->buf))
         io->buf[len] = '\0';
@@ -96,6 +101,15 @@ static void monitor_netlink_handler(int fd, uint32_t revents, void *userdata)
 
     if (uvc_monitor_uevent_decode(io->buf, len, &msg) != 0)
         return;
+
+    {
+        const char *action = uvc_monitor_uevent_get_value(&msg, "ACTION");
+        const char *devname = uvc_monitor_uevent_get_value(&msg, "DEVNAME");
+        const char *devpath = uvc_monitor_uevent_get_value(&msg, "DEVPATH");
+        uvc_log_printf("uvc monitor: uevent action=%s devname=%s devpath=%s fields=%d\n",
+                       action ? action : "-", devname ? devname : "-",
+                       devpath ? devpath : "-", msg.size);
+    }
 
     uvc_monitor_dispatch_uevent(io->mon->bus, &io->mon->extcon, &msg);
 }
@@ -129,6 +143,71 @@ static int monitor_loop_should_stop(void *ctx)
     return !mon->run;
 }
 
+static int monitor_timeout_ms(void *ctx)
+{
+    (void)ctx;
+    return 500;
+}
+
+static void monitor_uvc_rebind_if_stuck(struct uvc_device_monitor *mon)
+{
+    FILE *fp;
+    char state[32] = {0};
+    char udc[128] = {0};
+    int fd;
+    ssize_t n;
+
+    fp = fopen("/sys/class/android_usb/android0/state", "r");
+    if (!fp)
+        return;
+    if (!fgets(state, sizeof(state), fp)) {
+        fclose(fp);
+        return;
+    }
+    fclose(fp);
+    if (strncmp(state, "DISCONNECTED", 12) != 0 ||
+        !uvc_monitor_extcon_stream_ready()) {
+        if (strncmp(state, "DISCONNECTED", 12) != 0)
+            mon->rebind_requested = false;
+        return;
+    }
+    if (mon->rebind_requested)
+        return;
+
+    fd = open("/sys/kernel/config/usb_gadget/rockchip/UDC", O_RDWR);
+    if (fd < 0)
+        return;
+    n = read(fd, udc, sizeof(udc) - 1);
+    if (n <= 0) {
+        close(fd);
+        return;
+    }
+    while (n > 0 && (udc[n - 1] == '\n' || udc[n - 1] == '\r'))
+        n--;
+    udc[n] = '\0';
+    if (n == 0) {
+        close(fd);
+        return;
+    }
+
+    uvc_log_printf("uvc monitor: UVC-only UDC rebind (%s), preserving ADB/RNDIS config\n", udc);
+    if (lseek(fd, 0, SEEK_SET) >= 0 && write(fd, "\n", 1) == 1) {
+        usleep(200000);
+        if (lseek(fd, 0, SEEK_SET) >= 0)
+            (void)write(fd, udc, (size_t)n);
+        mon->rebind_requested = true;
+    }
+    close(fd);
+}
+
+static void monitor_on_timeout(void *ctx)
+{
+    struct uvc_device_monitor *mon = ctx;
+
+    uvc_monitor_extcon_publish(&mon->extcon);
+    monitor_uvc_rebind_if_stuck(mon);
+}
+
 static void monitor_thread_loop(struct uvc_device_monitor *mon)
 {
     struct monitor_nl_io nl_io;
@@ -136,8 +215,14 @@ static void monitor_thread_loop(struct uvc_device_monitor *mon)
     int sockfd = -1;
     int lr;
 
-    if (monitor_open_netlink(&sockfd) != 0)
+    if (monitor_open_netlink(&sockfd) != 0) {
+        uvc_log_printf("uvc monitor: open netlink failed: %s (%d)\n",
+                       strerror(errno), errno);
         return;
+    }
+
+    uvc_log_printf("uvc monitor: loop started netlink_fd=%d wake_fd=%d\n",
+                   sockfd, mon->wake_pipe[0]);
 
     ep = uvc_epoll_create(8);
     if (!ep)
@@ -160,11 +245,13 @@ static void monitor_thread_loop(struct uvc_device_monitor *mon)
 
     uvc_monitor_extcon_sync(&mon->extcon);
 
-    lr = uvc_epoll_loop(ep, NULL, NULL, monitor_loop_should_stop, mon);
+    lr = uvc_epoll_loop(ep, monitor_timeout_ms, monitor_on_timeout,
+                        monitor_loop_should_stop, mon);
     if (lr < 0)
-        printf("uvc monitor: epoll %s\n", strerror(-lr));
+        uvc_log_printf("uvc monitor: epoll %s\n", strerror(-lr));
 
 out:
+    uvc_log_printf("uvc monitor: loop stopped\n");
     uvc_epoll_destroy(ep);
     if (sockfd >= 0)
         close(sockfd);
@@ -175,30 +262,60 @@ static void *monitor_thread_entry(void *arg)
     struct uvc_device_monitor *mon = arg;
 
     prctl(PR_SET_NAME, "uvc_dev_monitor", 0, 0, 0);
-    monitor_thread_loop(mon);
-    mon->started = false;
+    while (mon->run) {
+        monitor_thread_loop(mon);
+        if (mon->run) {
+            uvc_log_printf("uvc monitor: restarting after unexpected exit\n");
+            sleep(1);
+        }
+    }
     return NULL;
 }
 
 int uvc_device_monitor_start(struct uvc_device_monitor *mon)
 {
+    int error;
+    int flags;
     int ret;
 
     if (!mon || mon->started)
         return 0;
 
+    uvc_log_printf("uvc monitor: start\n");
+
     if (mon->wake_pipe[0] < 0 && pipe(mon->wake_pipe) != 0)
         return -errno;
+
+    flags = fcntl(mon->wake_pipe[0], F_GETFL, 0);
+    if (flags < 0 || fcntl(mon->wake_pipe[0], F_SETFL, flags | O_NONBLOCK) < 0)
+        goto err_pipe;
+    flags = fcntl(mon->wake_pipe[1], F_GETFL, 0);
+    if (flags < 0 || fcntl(mon->wake_pipe[1], F_SETFL, flags | O_NONBLOCK) < 0)
+        goto err_pipe;
+    fcntl(mon->wake_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(mon->wake_pipe[1], F_SETFD, FD_CLOEXEC);
 
     mon->run = true;
     ret = pthread_create(&mon->tid, NULL, monitor_thread_entry, mon);
     if (ret != 0) {
         mon->run = false;
-        return ret;
+        error = ret;
+        goto err_pipe_code;
     }
 
     mon->started = true;
+    uvc_log_printf("uvc monitor: worker started tid=%lu\n", (unsigned long)mon->tid);
     return 0;
+
+err_pipe:
+    error = errno;
+err_pipe_code:
+    uvc_log_printf("uvc monitor: start failed error=%d (%s)\n",
+                   error, strerror(error));
+    close(mon->wake_pipe[0]);
+    close(mon->wake_pipe[1]);
+    mon->wake_pipe[0] = mon->wake_pipe[1] = -1;
+    return -error;
 }
 
 void uvc_device_monitor_stop(struct uvc_device_monitor *mon)
@@ -208,6 +325,7 @@ void uvc_device_monitor_stop(struct uvc_device_monitor *mon)
     if (!mon || !mon->started)
         return;
 
+    uvc_log_printf("uvc monitor: stop begin\n");
     mon->run = false;
     if (mon->wake_pipe[1] >= 0)
         write(mon->wake_pipe[1], &c, 1);
@@ -220,4 +338,5 @@ void uvc_device_monitor_stop(struct uvc_device_monitor *mon)
     if (mon->wake_pipe[1] >= 0)
         close(mon->wake_pipe[1]);
     mon->wake_pipe[0] = mon->wake_pipe[1] = -1;
+    uvc_log_printf("uvc monitor: stop complete\n");
 }
